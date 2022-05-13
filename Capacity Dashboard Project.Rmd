@@ -1,0 +1,905 @@
+---
+title: "Team Capacity Management Dashboard"
+# author: "Michalis Zouvelos"
+# date: "May 2022"
+output: 
+  flexdashboard::flex_dashboard:
+    social: ["menu"]
+    source_code: embed
+    vertical_layout: fill
+    theme: flatly
+runtime: shiny
+---
+
+``` {js}
+// Inverse color of navigation bar.
+$('.navbar-inverse').removeClass('navbar-inverse').addClass('navbar-default');
+```
+
+
+```{r setup, include=FALSE}
+# Loading the pacman library
+if (!require(pacman)) install.packages('pacman')
+library(pacman)
+# Importing the required Packages using pacman
+pacman::p_load(tidyverse, vroom, flexdashboard, lubridate, shiny, plyr, tidyr, DT, htmlwidgets, shiny, shinydashboard, highcharter, DT, viridis, shinyBS, shinyjs, withr, treemap, WDI, shinycssloaders, timevis, bslib, janitor, tibble, echarts4r)
+```
+
+```{r read, include = FALSE}
+# reading the combined Capacity excel file
+
+capacity <- readxl::read_excel("data.xlsx")
+
+
+# renaming columns
+capacity <- capacity %>%
+  dplyr::rename(Employee = `Employee Name`) %>% 
+  dplyr::rename(Contract_end = `Contract End`) %>% 
+  dplyr::rename(Project = `Project Name`) %>% 
+  dplyr::rename(Proj_Status = Status) %>% 
+  dplyr::rename(Progress = `Project Progress`)
+
+cols.num <- c(8:59)
+capacity[cols.num] <- sapply(capacity[cols.num],as.character)
+
+
+# Transformation of the wide data set format to a long format to track week series
+capacity <- pivot_longer(capacity,cols = Week_1:Week_52, names_to = "Week", names_prefix = "Week_", values_to = "value") # Pivot weekly values to Long Format
+
+capacity$Progress <- as.numeric(capacity$Progress) # Turning progress of the project to numeric
+capacity$value <- as.numeric(capacity$value) # Turning value column into numeric from factor
+capacity$value[is.na(capacity$value)] <- 0 # Replacing missing values with 0
+
+capacity$Week <- as.numeric(capacity$Week) # Turning week column into numeric
+
+# capacity$Contract_end <- as.numeric(capacity$Contract_end) # Turning Contract end date to numeric
+# capacity$Contract_end <- excel_numeric_to_date(as.numeric(as.character(capacity$Contract_end)), date_system = "modern") # Turning Contract date to proper date, modern style 
+
+# Getting Date extracted from Week number
+capacity <- capacity %>% 
+  mutate(week_date = as.Date(paste(2022, capacity$Week, 1, sep = "-"), "%Y-%U-%u"))
+
+capacity$full_date <- capacity$week_date
+
+capacity$week_date <- format(ymd(capacity$week_date), "%d-%m")
+
+capacity$day <- sapply(capacity$week_date, FUN = function(x) {strsplit(x, split = '[-]')[[1]][1]})
+capacity$month <- sapply(capacity$week_date, FUN = function(x) {strsplit(x, split = '[-]')[[1]][2]})
+
+capacity$day <- as.numeric(capacity$day)
+capacity$month <- as.numeric(capacity$month)
+capacity$month <- month.abb[capacity$month]
+
+capacity$week_full <- paste(capacity$month, capacity$day, sep = "-")
+
+# Make dataframe of week numbers and date ranges
+week_df <- capacity %>% 
+  distinct(Week, week_full)
+
+# Custom function to extract the dates for every friday in desired date range
+pick.wkday <- function(selday,start,end) {
+  fwd.7 <- start + 0:6
+  first.day <- fwd.7[as.numeric(format(fwd.7,"%w"))==selday]
+  seq.Date(first.day,end,by="week")
+}
+
+# Extracting all Dates for Fridays in 2022
+week_df$friday_date <- pick.wkday(5,as.Date("2022-01-01"), as.Date("2022-12-31"))
+
+# keep only the day from the friday date
+week_df$friday_date <- as.character(week_df$friday_date)
+week_df$friday <- sapply(week_df$friday_date, FUN = function(x) {strsplit(x, split = '[-]')[[1]][3]})
+week_df$friday <- as.numeric(week_df$friday)
+capacity$week_full <- paste(capacity$month, capacity$day, sep = "-")
+week_df$week_full <- paste(week_df$week_full, week_df$friday, sep = "-")
+
+capacity$value <- capacity$value*100 # Turning values to represent percentages
+```
+
+```{r include=FALSE}
+# Plot style functions
+
+# valueBox style custom function
+VB_style <- function(msg = 'Message', style="font-size: 100%;"){
+   tags$p( msg , style = style )
+}
+
+# Create a custom theme for the highchart plots 
+custom_theme <- hc_theme(
+  colors = c('#5CACEE', 'green', 'red'),
+  chart = list(
+         backgroundColor = '#FAFAFA', 
+         plotBorderColor = "black"),
+  xAxis = list(
+         gridLineColor = "E5E5E5", 
+         labels = list(style = list(color = "#333333")), 
+         lineColor = "#E5E5E5", 
+         minorGridLineColor = "#E5E5E5", 
+         tickColor = "#E5E5E5", 
+         title = list(style = list(color = "#333333"))), 
+  yAxis = list(
+         gridLineColor = "#E5E5E5", 
+         labels = list(style = list(color = "#333333")), 
+         lineColor = "#E5E5E5", 
+         minorGridLineColor = "#E5E5E5", 
+         tickColor = "#E5E5E5", 
+         tickWidth = 1, 
+         title = list(style = list(color = "#333333"))),   
+  title = list(style = list(color = '#333333', fontFamily = "Lato")),
+  subtitle = list(style = list(color = '#666666', fontFamily = "Lato")),
+  legend = list(
+         itemStyle = list(color = "#333333"), 
+         itemHoverStyle = list(color = "#FFF"), 
+         itemHiddenStyle = list(color = "#606063")), 
+  credits = list(style = list(color = "#666")),
+  itemHoverStyle = list(color = 'gray'))
+```
+
+<style>
+.colored {
+  background-color: #FAFAFA;
+}
+</style>
+
+Department Overview {data-orientation=rows data-icon="fa-sitemap"}
+=======================================================================
+
+Column {.sidebar data-width=250}
+-----------------------------------------------------------------------
+```{r}
+type_choice <- capacity$Type %>% 
+  na.omit() %>% 
+  sort()
+
+#  Importing slider filter for Team Member Type
+selectInput(inputId = "v_type", 
+           label = h3('Pick Type here:'), unique(type_choice), selected = "")
+
+week_choice <- capacity$Week %>% 
+  na.omit() %>% 
+  sort()
+
+# Importing slider filter for Week - default selection as current week
+selectInput(inputId = "v_week", 
+           label = h3('Pick Week here:'), unique(week_choice), selected = strftime(Sys.Date(), format = "%V"))
+
+
+
+# Display Datatable to be able to scroll through the weeks and see date range of each week of the year
+
+week_df %>%
+    distinct(Week, week_full) %>% 
+  DT::datatable(rownames = FALSE, colnames = c('Week', 'Date Range'),
+                class = 'cell-border stripe',
+                options = list(autoWidth = TRUE, scrollY = 600, scrollX = FALSE, paging = FALSE, dom = 't', ordering = FALSE,
+                columnDefs = list(list(className = 'dt-left', targets = "_all"),list(width ="40px", targets = 0),list(width ="115", targets = 1))))
+
+
+```
+
+Row {data-height=500}
+-----------------------------------------------------------------------
+
+### Team Total Outlook by Type (filter Contractor or Internal) {.no-padding}
+
+```{r}
+# data frame
+overview_type <- capacity %>%
+  select(Week, value, Type, Employee, week_full) %>%
+  na.omit() %>% 
+  dplyr::group_by(Week, Employee, Type, week_full) %>% 
+  dplyr::summarise(value = sum(value)) %>% 
+  arrange(Week) 
+```
+
+```{r}
+# Highchart plot visualizing all same type team members total weekly involvement 
+output$plot_type <- renderHighchart({
+highchart() %>%
+                         #    hc_exporting(enabled = TRUE, formAttributes = list(target = "_blank")) %>%
+                             hc_add_series( data =  overview_type %>% filter(Type %in% input$v_type) ,
+                                            mapping = hcaes(  x = Week, y = value, group = Employee ),
+                                            type = 'line',
+                                            marker = list(symbol = 'circle') ,
+                                            visible = c(T,rep(F,length(10)-1))
+                             ) %>%
+                          #   hc_xAxis( categories = c( unique( p$Week) ) ) %>%
+                             hc_xAxis( title = list(text = "Weeks")) %>%
+                             hc_yAxis( title = list(text = "Involvement per Week (Employee)"), 
+                                       allowDecimals = TRUE,labels = list(format = "{value}%")) %>%
+                             hc_plotOptions(line = list(
+                                dataLabels = list(enabled = F),
+                                enableMouseTracking = T)
+                             )%>%
+                             hc_tooltip(table = TRUE,
+                                        sort = TRUE,
+                                        pointFormat = paste0( '<br> <span style="color:{point.color}">\u25CF</span>',
+                                                              "{series.name}: <b>{point.y}%</b> "),
+                                        headerFormat = '<span style="font-size: 13px"><b>Week {point.key}</b></span>'
+                             ) %>%
+                             hc_legend( layout = 'vertical', align = 'right', verticalAlign = 'top', floating = T, x = -50, y = -15 )
+})
+
+highchartOutput('plot_type')
+
+```
+
+
+Row {data-height=500}
+-----------------------------------------------------------------------
+
+### {.no-padding}
+
+
+```{r}
+output$plot_weekly <- renderHighchart({
+weekly_capacity_internal <- capacity %>%
+  dplyr::filter(Type == "Internal") %>% 
+  dplyr::select(Employee, value, Week) %>% 
+  dplyr::group_by(Employee, Week) %>% 
+  dplyr::summarise(value = sum(value)) %>% 
+  dplyr::filter(Week %in% input$v_week) %>% 
+  dplyr::arrange(-value)
+  
+weekly_capacity_internal %>% 
+ hchart(type = 'column', options3d = list(enabled = TRUE, alpha = 15, beta = 15), hcaes(x = reorder(Employee,value), y = value), color = "#d3d3d3", name = "Weekly Capacity") %>% 
+ hc_yAxis(title = list(text = "Weekly Capacity"),labels = list(format = "{value}%")) %>%  
+ hc_xAxis(title = list(text = "Resource"), labels = list(rotation=-45)) %>% 
+ hc_title(text = "Weekly <b>Internal Employees</b> capacity", style = list(color = "#000000", useHTML = TRUE), labels = list(format = "{value}%")) %>% 
+ hc_plotOptions(series = list(stacking = FALSE, allowPointSelect = TRUE), column = list(
+    colorByPoint = FALSE,
+    pointPadding = 0,
+    groupPadding = 0.05,
+    states = list(
+      hover = list(
+        enabled = FALSE
+      )
+    ),
+    animation = FALSE,
+    dataLabels = list(
+      align = "center",
+      enabled = TRUE,                                   
+      formatter = JS(paste0("function() {                              
+                           var max = this.series.yAxis.max,
+                           color = this.y ? '#000000' : '#000000';
+                           return '<span style=\"color: ' + color + '\">' + this.y + '%</span>' + '<span style=\"color: red\"> ';
+    }")),
+      style = list(color = "#0D538D", textShadow = "0"),
+      shadow = FALSE,
+      x = 1,
+      y = 1
+    ))
+  ) %>% 
+  hc_chart(events = list(load = JS("function() {
+        let chart = this,
+          x;
+
+        chart.series[0].points.forEach(p => {
+          if (p.value > 100) {
+            x = p.x;
+            p.graphic.element.style.fill = 'red';
+          }
+        })
+        chart.series[0].points.forEach(p => {
+          if (p.value <= 100 && p.value > 80) {
+            x = p.x;
+            p.graphic.element.style.fill = 'yellow';
+          }
+        })
+        chart.series[0].points.forEach(p => {
+          if (p.value <= 80) {
+            x = p.x;
+            p.graphic.element.style.fill = 'green';
+          }
+        })
+      }
+  ")))
+  
+})
+
+highchartOutput('plot_weekly')
+```
+
+### {.no-padding}
+
+```{r}
+output$coolplot_weekly2 <- renderHighchart({
+weekly_capacity_external <- capacity %>%
+  dplyr::filter(Type == "Contractor") %>% 
+  dplyr::select(Employee, value, Week) %>% 
+  dplyr::group_by(Employee, Week) %>% 
+  dplyr::summarise(value = sum(value)) %>% 
+  dplyr::filter(Week %in% input$v_week) %>% 
+  dplyr::arrange(-value)
+  
+weekly_capacity_external %>% 
+ hchart(type = 'column', options3d = list(enabled = TRUE, alpha = 15, beta = 15), hcaes(x = reorder(Employee,value), y = value), color = "#d3d3d3", name = "Weekly Capacity") %>% 
+ hc_yAxis(title = list(text = "Weekly Capacity"), labels = list(format = "{value}%")) %>%  
+ hc_xAxis(title = list(text = "Resource"), labels = list(rotation=-45)) %>% 
+ hc_title(text = "Weekly <b>External Contractors</b> capacity", style = list(color = "#000000", useHTML = TRUE)) %>% 
+ hc_plotOptions(series = list(stacking = FALSE, allowPointSelect = TRUE), column = list(
+    colorByPoint = FALSE,
+    pointPadding = 0,
+    groupPadding = 0.05,
+    states = list(
+      hover = list(
+        enabled = FALSE
+      )
+    ),
+    animation = FALSE,
+    dataLabels = list(
+      align = "center",
+      enabled = TRUE,                                    
+      formatter = JS(paste0("function() {                              
+                           var max = this.series.yAxis.max,
+                           color = this.y ? '#000000' : '#000000';
+                           return '<span style=\"color: ' + color + '\">' + this.y + '%</span>' + '<span style=\"color: red\"> ';
+    }")),
+      style = list(color = "#0D538D", textShadow = "0"),
+      shadow = FALSE,
+      x = 1,
+      y = 1
+    ))
+  ) %>% 
+  hc_chart(events = list(load = JS("function() {
+        let chart = this,
+          x;
+
+        chart.series[0].points.forEach(p => {
+          if (p.value > 100) {
+            x = p.x;
+            p.graphic.element.style.fill = 'red';
+          }
+        })
+        chart.series[0].points.forEach(p => {
+          if (p.value <= 100 && p.value > 80) {
+            x = p.x;
+            p.graphic.element.style.fill = 'yellow';
+          }
+        })
+        chart.series[0].points.forEach(p => {
+          if (p.value <= 80) {
+            x = p.x;
+            p.graphic.element.style.fill = 'green';
+          }
+        })
+      }
+  ")))
+
+  
+})
+
+highchartOutput('coolplot_weekly2')
+```
+
+
+Department Projects {data-icon="fa-calculator"}
+=======================================================================
+
+Column {.sidebar data-width=250}
+-----------------------------------------------------------------------
+
+```{r}
+project_choice <- capacity$Project %>% 
+  na.omit() %>% 
+  sort()
+
+# Importing dropdown filter for Projects
+selectInput(inputId = "v_project", 
+           label = h3('Pick Project here:'), unique(project_choice), selected = "")
+
+# Display Datatable to be able to scroll through the weeks
+
+week_df %>%
+    distinct(Week, week_full) %>% 
+  DT::datatable(rownames = FALSE, colnames = c('Week', 'Date Range'),
+                class = 'cell-border stripe',
+                options = list(autoWidth = TRUE, scrollY = 600, scrollX = FALSE, paging = FALSE, dom = 't', ordering = FALSE,
+                columnDefs = list(list(className = 'dt-left', targets = "_all"),list(width ="40px", targets = 0),list(width ="115", targets = 1))))
+
+```
+
+
+Column {.tabset .tabset-fade data-width=750 data-height = 500 .colored }
+-----------------------------------------------------------------------
+
+### {.no-padding}
+
+```{r}
+t_proj <- capacity %>%
+  select(Week, value, Project, week_full) %>%
+  na.omit() %>% 
+  dplyr::group_by(Week, Project, week_full) %>% 
+  dplyr::summarise(value = sum(value)/100) %>% 
+  arrange(Week) 
+
+```
+
+
+```{r}
+# Highchart plot for tracking weekly total involvement of the team per Project
+output$plot4 <- renderHighchart({
+# Create line plot.
+highchart() %>% 
+    hc_add_series(t_proj %>% 
+                    filter(Project %in% input$v_project)
+                  , hcaes(x = Week, y = value, color = value), type = "line") %>%
+  #  hc_tooltip(crosshairs = TRUE, borderWidth = 1.5, pointFormat = paste("Week: <b>{point.x}</b> <br> Value: <b>{point.y}</b>", "<br>Resource: <b>{Resource}</b>",
+  #                              headerFormat = '<span style="font-size: 13px"><b>Week {point.key}</b></span>'  )) %>%
+    hc_tooltip(table = TRUE,
+                        sort = TRUE,
+                        pointFormat = paste0(" ~ <b>{point.week_full}</b><br>Involvement: <b>{point.y}</b> "),
+                        headerFormat = '<span style="font-size: 13px"><b>Week {point.key}</b></span>') %>% 
+    hc_title(text = "Project Total Capacity by week") %>% 
+    hc_subtitle(text = "2022") %>%
+    hc_xAxis(title = list(text = "Weeks")) %>%
+    hc_yAxis(title = list(text = "Involvement per week (Total)"),
+             allowDecimals = TRUE, 
+             plotLines = list(list(
+                    color = "black", width = 1, dashStyle = "Dash", 
+                    label = list(text = "", align = "left",
+                                 style = list(color = "black"))))) %>%
+    hc_legend(enabled = FALSE)  %>% 
+    hc_add_theme(custom_theme)  %>% 
+  hc_chart(events = list(load = JS("function() {
+        let chart = this,
+          x;
+
+        chart.series[0].points.forEach(p => {
+          if (p.value > 1) {
+            x = p.x;
+            p.graphic.element.style.fill = '#FF0000';
+          }
+        })
+        chart.series[0].points.forEach(p => {
+          if (p.value > 0.8 && p.value <= 1) {
+            x = p.x;
+            p.graphic.element.style.fill = '#EACE09';
+          }
+        })
+        chart.series[0].points.forEach(p => {
+          if (p.value <= 0.8) {
+            x = p.x;
+            p.graphic.element.style.fill = '#228b22';
+          }
+        })
+        
+
+      }
+  ")))
+})
+
+highchartOutput('plot4')
+
+
+```
+
+
+### Project Resources {.no-padding}
+
+```{r, include = FALSE}
+p_proj <- capacity %>%
+  select(Week, value, Employee, Project, week_full) %>%
+  na.omit() %>% 
+  dplyr::group_by(Week, Employee, Project, week_full) %>% 
+  dplyr::summarise(value = sum(value)) %>% 
+  arrange(Week)
+
+```
+
+```{r}
+# Highchart plot for tracking involvement of each team member at selected project
+output$plot5 <- renderHighchart({
+highchart() %>%
+                         #    hc_exporting(enabled = TRUE, formAttributes = list(target = "_blank")) %>%
+                             hc_add_series( data =  p_proj %>% filter(Project %in% input$v_project) ,
+                                            mapping = hcaes(  x = Week, y = value, group = Employee ),
+                                            type = 'line',
+                                            marker = list(symbol = 'circle') ,
+                                            visible = c(T,rep(F,length(10)-1))
+                             ) %>%
+                          #   hc_xAxis( categories = c( unique( p$Week) ) ) %>%
+                             hc_xAxis( title = list(text = "Weeks")) %>%
+                             hc_yAxis( title = list(text = "Involvement % per Week (Employee)", plotLines = list(list(
+                    color = "black", width = 1, dashStyle = "Dash", 
+                    value = 80, labels = list(format = "{value}%"),
+                    label = list(text = "Target = 80%", align = "left",
+                                 style = list(color = "black")))), 
+                                       allowDecimals = TRUE)) %>%
+                             hc_plotOptions(line = list(
+                                dataLabels = list(enabled = F),
+                                #stacking = "normal",
+                                enableMouseTracking = T)
+                             )%>%
+                             hc_tooltip(table = TRUE,
+                                        sort = TRUE,
+                                        pointFormat = paste0( '<br> <span style="color:{point.color}">\u25CF</span>',
+                                                              "{series.name}: <b>{point.y}%</b> "),
+                                        headerFormat = '<span style="font-size: 13px"><b>Week {point.key}</b></span>'
+                             ) %>%
+                             hc_legend( layout = 'vertical', align = 'right', verticalAlign = 'top', floating = T, x = -50, y = -15 )
+})
+
+highchartOutput('plot5')
+
+```
+
+
+
+Column {data-width=150}
+-----------------------------------------------------------------------
+
+### Project Status {.value-box}
+
+```{r}
+# Project Status value box
+output$box_type2 <- flexdashboard::renderValueBox({
+k2 <- capacity %>% 
+  mutate(reactive_color = case_when(Proj_Status == "In progress" ~ "green",
+                                    Proj_Status == "Cancelled" ~ "red",
+                                    Proj_Status == "Paused" ~ "orange",
+                                    Proj_Status == "Planned" ~ "grey")) %>% 
+  select(Project, Proj_Status, reactive_color) %>% 
+  filter(Project %in% input$v_project) %>% 
+  na.omit()
+
+flexdashboard::valueBox(
+           VB_style( paste0(format(unique(k2$Proj_Status),big.mark=','), " "), "font-size: 100%; font-weight: bold;"  ),
+            "",  
+            color = unique(k2$reactive_color)
+         )
+})
+
+flexdashboard::valueBoxOutput("box_type2")
+```
+
+
+### Business Department {.value-box}
+
+```{r}
+# Business Department of the Project focus
+output$box_type1 <- flexdashboard::renderValueBox({
+k1 <- capacity %>% 
+  select(Project, Area) %>% 
+  filter(Project %in% input$v_project) %>% 
+  na.omit
+
+flexdashboard::valueBox(
+           VB_style( paste0(format(unique(k1$Area),big.mark=','), " "), "font-size: 100%; font-weight: bold;"  ),
+            "",
+         )
+})
+
+flexdashboard::valueBoxOutput("box_type1")
+```
+
+### 
+
+```{r}
+# Cool echart package plot to show percentage of project progression
+renderEcharts4r({
+progress <- capacity %>%
+  select(Project, Progress) %>% 
+  dplyr::filter(Project %in% input$v_project) %>% 
+  na.omit
+
+progression <- unique(progress$Progress)
+
+
+  e_charts() |>
+    e_gauge(progression, "PERCENT")|> 
+    e_title("Project Progress" ,subtext = "% of Project Completion")
+  })
+```
+
+### 
+
+```{r}
+# Pie chart by the type of employee in each project
+output$plot6 <- renderHighchart({
+  
+pie_df <- capacity %>% 
+  dplyr::group_by(Project, Type, Employee) %>%
+  dplyr::summarise() %>%
+  dplyr::select(Project, Type, Employee) %>% 
+  na.omit() %>% 
+  filter(Project %in% input$v_project)
+
+hchart(pie_df$Type,	"pie", color = "#354e5a", name = "Project Status") %>% 
+  hc_tooltip(borderWidth = 1.5, headerFormat = "<b>{point.key}</b><br>", pointFormat = paste("Percentage: <b> {point.percentage:.2f}%</b> <br> Amount by Type: <b>{point.y}</b>")) %>%
+  hc_title(text = "<b>Resource Type Distribution</b>")  %>% 
+   hc_plotOptions(pie = list(dataLabels = list(distance = 5, 
+                            style = list(fontSize = 10)), 
+                            size = 150)) 
+})
+highchartOutput('plot6')
+
+```
+
+
+Department Employees {data-icon="fa-address-card"}
+=======================================================================
+
+Column {.sidebar data-width=250}
+-----------------------------------------------------------------------
+
+```{r}
+employee_choice <- capacity$Employee %>% 
+  na.omit() %>% 
+  sort()
+
+selectInput(inputId = "v_employee", 
+           label = h3('Pick Employee here:'), unique(employee_choice), selected = "")
+
+# Display Datatable to be able to scroll through the weeks
+week_df %>%
+    distinct(Week, week_full) %>% 
+  DT::datatable(rownames = FALSE, colnames = c('Week', 'Date Range'),
+                class = 'cell-border stripe',
+                options = list(autoWidth = TRUE, scrollY = 600, scrollX = FALSE, paging = FALSE, dom = 't', ordering = FALSE,
+                columnDefs = list(list(className = 'dt-left', targets = "_all"),list(width ="40px", targets = 0),list(width ="115", targets = 1))))
+```
+
+Column {.tabset .tabset-fade data-width=750 data-height = 500 .colored }
+-----------------------------------------------------------------------
+
+### {.no-padding}
+
+```{r}
+df_t <- capacity %>%
+  select(Week, value, Employee, week_full) %>%
+  na.omit() %>% 
+  dplyr::group_by(Week, Employee, week_full) %>% 
+  dplyr::summarise(value = sum(value)) %>% 
+  arrange(Week)
+```
+
+
+```{r}
+
+output$plot <- renderHighchart({
+# Create line plot.
+highchart() %>% 
+    hc_add_series(df_t %>% 
+                    filter(Employee %in% input$v_employee)
+                  , hcaes(x = Week, y = value, color = value), type = "line") %>%
+    hc_tooltip(table = TRUE,
+                        sort = TRUE,
+                        pointFormat = paste0(" ~ <b>{point.week_full}<br>Involvement: <b>{point.y}%</b> "),
+                        headerFormat = '<span style="font-size: 13px"><b>Week {point.key}</b></span>') %>% 
+    hc_title(text = "Employee Total % Weekly Capacity") %>% 
+    hc_subtitle(text = "2022") %>%
+    hc_xAxis(title = list(text = "Weeks")) %>%
+    hc_yAxis(title = list(text = "Involvement % per week (Total)"),
+             allowDecimals = TRUE, labels = list(format = "{value}%"),
+             plotLines = list(list(
+                    color = "black", width = 1, dashStyle = "Dash", 
+                    value = 80,
+                    label = list(text = "Target = 80%", align = "left",
+                                 style = list(color = "black"))))) %>%
+    hc_legend(enabled = FALSE)  %>% 
+    hc_add_theme(custom_theme)  %>% 
+  hc_chart(events = list(load = JS("function() {
+        let chart = this,
+          x;
+
+        chart.series[0].points.forEach(p => {
+          if (p.value > 100) {
+            x = p.x;
+            p.graphic.element.style.fill = '#FF0000';
+          }
+        })
+        chart.series[0].points.forEach(p => {
+          if (p.value > 80 && p.value <= 100) {
+            x = p.x;
+            p.graphic.element.style.fill = '#EACE09';
+          }
+        })
+        chart.series[0].points.forEach(p => {
+          if (p.value <= 80) {
+            x = p.x;
+            p.graphic.element.style.fill = '#228b22';
+          }
+        })
+        
+
+      }
+  ")))
+})
+
+highchartOutput('plot')
+
+
+```
+
+
+### Resource Projects Involvement {.no-padding}
+
+```{r, include = FALSE}
+df_p <- capacity %>%
+  select(Week, value, Employee, Project) %>%
+  na.omit() %>% 
+  dplyr::group_by(Week, Employee, Project) %>% 
+  dplyr::summarise(value = sum(value)) %>% 
+  arrange(Week)
+```
+
+```{r}
+output$plot2 <- renderHighchart({
+highchart() %>%
+                            # hc_exporting(enabled = TRUE, formAttributes = list(target = "_blank")) %>%
+                             hc_add_series( data =  df_p %>% filter(Employee %in% input$v_employee) ,
+                                            mapping = hcaes(  x = Week, y = value, group = Project ),
+                                            type = 'line',
+                                            marker = list(symbol = 'circle') ,
+                                            visible = c(T,rep(F,length(10)-1))
+                             ) %>%
+                          #   hc_xAxis( categories = c( unique( p$Week) ) ) %>%
+                             hc_xAxis( title = list(text = "Weeks")) %>%
+                             hc_yAxis( title = list(text = "Weekly % Involvement per Project"), 
+                                       allowDecimals = TRUE, labels = list(format = "{value}%")) %>%
+                             hc_plotOptions(line = list(
+                                dataLabels = list(enabled = F),
+                                #stacking = "normal",
+                                enableMouseTracking = T)
+                             )%>%
+                             hc_tooltip(table = TRUE,
+                                        sort = TRUE,
+                                        pointFormat = paste0( '<br> <span style="color:{point.color}">\u25CF</span>',
+                                                              " {series.name}: <b>{point.y}%</b> "),
+                                        headerFormat = '<span style="font-size: 13px"><b>Week {point.key}</b></span>'
+                             ) %>%
+                             hc_legend( layout = 'vertical', align = 'right', verticalAlign = 'top', floating = T, x = -50, y = -15 )
+})
+
+highchartOutput('plot2')
+
+```
+
+
+
+Column {data-width=150}
+-----------------------------------------------------------------------
+
+### Employee Type {.value-box}
+
+```{r}
+
+output$box_type <- flexdashboard::renderValueBox({
+df_k <- capacity %>% 
+  mutate(reactive_color = case_when(Type == "Internal" ~ "green",
+                                    Type == "Contractor" ~ "red")) %>% 
+  select(Employee, Type, reactive_color) %>% 
+  filter(Employee %in% input$v_employee) %>% 
+  na.omit
+
+flexdashboard::valueBox(
+           VB_style( paste0(format(unique(df_k$Type),big.mark=','), " "), "font-size: 100%; font-weight: bold;"  ),
+            "" ,  
+            color = unique(df_k$reactive_color)
+         )
+})
+
+flexdashboard::valueBoxOutput("box_type")
+```
+
+### Contract End Date {.value-box}
+
+```{r}
+output$box_type_end <- flexdashboard::renderValueBox({
+contract <- capacity %>% 
+  select(Employee, Contract_end) %>% 
+  filter(Employee %in% input$v_employee) %>% 
+  na.omit
+
+flexdashboard::valueBox(
+           VB_style( paste0(format(unique(contract$Contract_end),big.mark=','), " "), "font-size: 100%; font-weight: bold;"  ),
+            "", 
+         )
+})
+
+flexdashboard::valueBoxOutput("box_type_end")
+
+```
+
+### 
+
+```{r}
+# Cool echart package plot to show percentage of utilization of each emplyoee to date
+renderEcharts4r({
+utilization <- capacity %>%
+  dplyr::filter(Employee %in% input$v_employee) %>% 
+  dplyr::select(Employee, value, Week) %>% 
+  dplyr::group_by(Employee, Week) %>% 
+  dplyr::summarise(value = sum(value)/100) %>% 
+  dplyr::filter(Week <= strftime(Sys.Date(), format = "%V")) # get current week, and filter the data values up to this week
+
+performance <- round(mean(utilization$value),2)
+
+liquid <- data.frame(val = c(performance, performance-0.1, performance-0.2))
+    liquid |>
+      e_charts() |>
+      e_liquid(val)|> 
+  e_title("2022 Employee Utilization %" ,subtext = "Up to current week")
+  })
+```
+
+
+### 
+
+```{r}
+output$plot3 <- renderHighchart({
+df_pie2 <- capacity %>% 
+  dplyr::group_by(Project, Proj_Status, Employee) %>%
+  dplyr::summarise() %>%
+  dplyr::select(Project, Proj_Status, Employee) %>% 
+  na.omit() %>% 
+  filter(Employee %in% input$v_employee)
+
+hchart(df_pie2$Proj_Status,	"pie", color = "#354e5a", name = "Project Status") %>% 
+  hc_tooltip(borderWidth = 1.5, headerFormat = "<b>{point.key}</b><br>", pointFormat = paste("Percentage: <b> {point.percentage:.2f}%</b> <br> Number of Projects: <b>{point.y}</b>")) %>%
+  hc_title(text = "<b>Projects by Status</b>")  %>% 
+   hc_plotOptions(pie = list(dataLabels = list(distance = 5, 
+                            style = list(fontSize = 10)), 
+                            size = 150)) 
+})
+highchartOutput('plot3')
+```
+
+About {data-icon="fa-info-circle"}
+=======================================================================
+
+Column {data-width=600}
+-----------------------------------------------------------------------
+
+### { .colored }
+
+
+**Thank you for checking out my dashboard**
+
+
+If you want to see more of my past and future projects you can find them on my personal website portfolio or on my GitHub, links below:
+
+
+* [Michalis Zouvelos - Personal Website/Portfolio - Blog](https://mzouvelos.github.io/)
+
+* [GitHub](https://github.com/mzouvelos)
+
+
+<br> 
+
+
+**About the dashboard**
+
+
+The dashboard's **purpose** is to **solve the common problem** that many managers and companies face when trying to distribute their resources and plan their future capacity. 
+Different departments have numerous projects and a plethora of resources of different types. Thus, allocating these resources correctly and tracking each project's involvement 
+and individual involvement is crucial.
+
+Instead of spending hours of checking project and team capacity in a spreadsheet, an interactive dashboard is visually pleasing. It offers a more convenient and easy way of 
+tracking these metrics. The dashboard has three main views-pages:
+
+
+- **A Department Overview view:** Where you can filter by Type of Employee to get an overall view of their total weekly capacity by percentage and then filter by Week to 
+reallocate the workload between Employees and plan the capacity for future weeks.
+
+
+- **A Department Projects view:** Where you can filter by a project to see the total capacity allocated on the project, each Resource who is involved in the selected project, 
+and their weekly involvement in the project. Additionally, you can track the Project Status, the Business Area, the Project Progress, and the Employee Distribution by Resource 
+Type.
+
+- **A Department Employees view:** Where you can filter by Employee to check their total weekly capacity, the projects they are involved in, and how much they are involved in 
+each of the projects weekly. On top of that, there is information about their employment type, either internal or contractor, which would then include a contract end date and 
+their total utilization % up to the current date week.
+</p>
+
+The dashboard was created with [**RMarkdown**](https://rmarkdown.rstudio.com/) using the [**Flexdashboard**](https://pkgs.rstudio.com/flexdashboard/index.html) framework and 
+adding [**Shiny**](https://shiny.rstudio.com/) components to enable filters. Most plots were created with the Highcharts package, which offers interactive charts that you can 
+adjust further using Javascript. The code is available by clicking on the Source Code button.
+
+
+The data used to create the dashboard are an example of **fictional data** (featuring **Star Wars characters** as employees of the Galaxy Empire Co.) generated by me to serve 
+the purpose of creating the dashboard; thus, cleaning and preprocessing are limited in the code.
+
+
+
